@@ -1,0 +1,123 @@
+#!/usr/bin/python3
+
+# Author: Jordan Tomkinson
+# https://github.com/durzo/icinga-plugins
+
+# This plugin uses the EC2 API which is free, as apposed to other plugins that use CloudWatch GetMetricData
+
+import argparse
+import boto3
+import sys
+
+parser = argparse.ArgumentParser(
+    description='Check the status of an AWS VPC VPN connection.'
+)
+parser.add_argument(
+    '--aws-access-key-id',
+    action='store',
+    required=False,
+    default=None
+)
+parser.add_argument(
+    '--aws-secret-access-key',
+    action='store',
+    required=False,
+    default=None
+)
+parser.add_argument(
+    '--region',
+    action='store',
+    required=True
+)
+parser.add_argument(
+    '--profile',
+    action='store',
+    required=False,
+    default=None
+)
+parser.add_argument(
+    '--role-arn',
+    action='store',
+    dest='role_arn',
+    required=False,
+    default=None
+)
+parser.add_argument(
+    '--vpn-connection-id',
+    action='append',
+    dest='vpn_connection_ids',
+    required=True
+)
+parser.add_argument(
+    '--strict-checking',
+    action='store_true'
+)
+
+args = parser.parse_args()
+
+strict_mode = args.strict_checking
+
+boto3.setup_default_session(profile_name=args.profile)
+if args.role_arn:
+    client = boto3.client(
+        'sts',
+        aws_access_key_id=args.aws_access_key_id,
+        aws_secret_access_key=args.aws_secret_access_key,
+    )
+    response = client.assume_role(RoleArn=args.role_arn, RoleSessionName='crossaccount')
+    session = boto3.session.Session(aws_access_key_id=response['Credentials']['AccessKeyId'],
+                      aws_secret_access_key=response['Credentials']['SecretAccessKey'],
+                      aws_session_token=response['Credentials']['SessionToken'])
+    
+    client = session.client('sts')
+    ec2 = session.client(
+        'ec2',
+        region_name=args.region
+    )
+else:
+    ec2 = boto3.client(
+        'ec2',
+        region_name=args.region,
+        aws_access_key_id=args.aws_access_key_id,
+        aws_secret_access_key=args.aws_secret_access_key,
+    )
+
+try:
+    vpn_connections = ec2.describe_vpn_connections(VpnConnectionIds=args.vpn_connection_ids)['VpnConnections']
+except Exception as e:
+    print("UNKNOWN - {}".format(e))
+    sys.exit(3)
+
+total_tunnels_up = 0
+total_tunnels_num = 0
+
+for vpn_connection in vpn_connections:
+    tunnels_up = sum(
+        [vgw['Status'] == 'UP' for vgw in vpn_connection['VgwTelemetry']]
+    )
+    tunnels_num = len(vpn_connection['VgwTelemetry'])
+    if strict_mode and tunnels_up < tunnels_num:
+        print("WARNING - VPN connection {} only has {}/{} tunnels up | tunnels_up={};;;0;{}".format(
+            vpn_connection['VpnConnectionId'],
+            tunnels_up,
+            tunnels_num,
+            tunnels_up,
+            tunnels_num)
+        )
+        sys.exit(1)
+    elif tunnels_up < 1:
+        print("CRITICAL - VPN connection {} is down | tunnels_up={};;;0;{}".format(
+            vpn_connection['VpnConnectionId'],
+            tunnels_up,
+            tunnels_num)
+        )
+        sys.exit(2)
+    total_tunnels_up += tunnels_up
+    total_tunnels_num += tunnels_num
+
+print("OK - {} VPN connections up | tunnels_up={};;;0;{}".format(
+    total_tunnels_up,
+    total_tunnels_up,
+    total_tunnels_num)
+)
+sys.exit(0)
